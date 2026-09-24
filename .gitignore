@@ -1,0 +1,6 @@
+# Contains the answer key. Keep it local and in the Google Sheet only.
+content/questions.csv
+
+# Wrangler local state (Phase 2 Worker)
+.wrangler/
+node_modules/
