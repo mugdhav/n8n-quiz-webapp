@@ -1,0 +1,10 @@
+// Serves frontend/ as a static site on Cloudflare Workers (quiz.vmugdha.in).
+// No Worker script: frontend/_headers supplies the security headers.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "n8n-quiz",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./frontend"
+  }
+}
