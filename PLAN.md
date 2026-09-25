@@ -1,6 +1,6 @@
 # n8n Rapid-Fire Quiz: Implementation Plan
 
-A timed online quiz about [n8n](https://n8n.io), shared through LinkedIn and hosted on Cloudflare Pages at `https://quiz.vmugdha.in/`. It runs over two days and is open to anyone with the link. The only running cost is the Cloudflare Workers Paid plan ($5/month), which is needed to email sign-in codes.
+A timed online quiz about [n8n](https://n8n.io), shared through LinkedIn and hosted on Cloudflare at `https://quiz.vmugdha.in/`. It runs over two days and is open to anyone with the link. The only running cost is the Cloudflare Workers Paid plan ($5/month), which is needed to email sign-in codes.
 
 Step-by-step setup instructions are in [`SETUP.md`](SETUP.md).
 
@@ -20,7 +20,7 @@ Step-by-step setup instructions are in [`SETUP.md`](SETUP.md).
 ## 2. Architecture
 
 ```
-LinkedIn post ──► Cloudflare Pages: quiz.vmugdha.in (static HTML/CSS/JS from frontend/)
+LinkedIn post ──► Cloudflare static assets: quiz.vmugdha.in (HTML/CSS/JS from frontend/)
                         │  fetch() POST, Content-Type: text/plain
                         ▼
               Google Apps Script web app (backend)
@@ -36,7 +36,7 @@ LinkedIn post ──► Cloudflare Pages: quiz.vmugdha.in (static HTML/CSS/JS fr
 
 | Layer | Technology | Cost |
 |---|---|---|
-| Frontend hosting | [Cloudflare Pages](https://developers.cloudflare.com/pages/), deployed from the public `mugdhav/n8n-quiz-webapp` repo | Free |
+| Frontend hosting | Cloudflare static assets (Worker `n8n-quiz`, no code), deployed with `npx wrangler deploy` from the public `mugdhav/n8n-quiz-webapp` repo | Included |
 | Backend | [Google Apps Script](https://developers.google.com/apps-script) web app, running as the quizmaster | Free |
 | Database | Google Sheets | Free |
 | Sign-in code emails | [Cloudflare Email Service](https://developers.cloudflare.com/email-service/) (REST API, called from Apps Script) | Workers Paid, $5/month |
@@ -267,8 +267,9 @@ quizz-solution/
 │   ├── Code.gs          # doPost, status/start/answer/resume, scoring, setup(), clearCaches()
 │   └── Tests.gs         # runAllTests()
 ├── .gitignore           # keeps content/questions.csv (the answers) out of the public repo
-├── frontend/            # the only folder published (Cloudflare Pages, quiz.vmugdha.in)
-│   ├── _headers         # security headers (CSP, HSTS) for Cloudflare Pages
+├── wrangler.jsonc       # publishes frontend/ to quiz.vmugdha.in (npx wrangler deploy)
+├── frontend/            # the only folder published (quiz.vmugdha.in)
+│   ├── _headers         # security headers (CSP, HSTS), applied by Cloudflare
 │   ├── index.html
 │   ├── privacy.html
 │   ├── style.css

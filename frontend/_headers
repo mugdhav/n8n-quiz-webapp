@@ -1,4 +1,4 @@
-# Cloudflare Pages response headers for quiz.vmugdha.in. This file itself is not served.
+# Cloudflare response headers for quiz.vmugdha.in (static assets). This file itself is not served.
 # connect-src: the Apps Script backend and the host it redirects to.
 # script-src and frame-src: Cloudflare Turnstile.
 /*

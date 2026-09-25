@@ -7,7 +7,7 @@ This guide takes you from the files in this folder to a live quiz, then through 
 | 1 | Fill in the placeholders | 15 min |
 | 2 | Create the Google Sheet and the backend | 20 min |
 | 3 | Connect the frontend and test it on your computer | 15 min |
-| 4 | Publish on Cloudflare Pages at quiz.vmugdha.in | 10 min |
+| 4 | Publish at quiz.vmugdha.in on Cloudflare | 10 min |
 | 5 | Test before launch | 30 min, plus the dry run |
 | 6 | Launch | 10 min |
 | 7 | Run the quiz over the two days | A few checks a day |
@@ -186,19 +186,23 @@ Stop the local server with **Ctrl+C**.
 
 ---
 
-## Part 4: Publish on Cloudflare Pages at quiz.vmugdha.in
+## Part 4: Publish at quiz.vmugdha.in on Cloudflare
 
-[Cloudflare Pages](https://developers.cloudflare.com/pages/) publishes the `frontend/` folder of the `mugdhav/n8n-quiz-webapp` repository at `https://quiz.vmugdha.in/`. It updates by itself every time you push to `main`. Your main site (`mugdhav.github.io`, served at `www.vmugdha.in`) doesn't change.
+The quiz is hosted on Cloudflare as a static site: a Worker named `n8n-quiz` with no code, only the files in `frontend/`. `wrangler.jsonc` in the repository root sets this up and claims the custom domain `quiz.vmugdha.in`. Cloudflare serves the site, and your computer is used only to upload the files. Your main site (`mugdhav.github.io`, served at `www.vmugdha.in`) doesn't change.
 
-1. In the [Cloudflare dashboard](https://dash.cloudflare.com/), open **Workers & Pages → Create → Pages → Connect to Git**, and choose `mugdhav/n8n-quiz-webapp`.
-2. Set these build settings:
-   - **Framework preset:** None
-   - **Build command:** leave empty
-   - **Build output directory:** `frontend`
-3. Click **Save and Deploy**. After a minute, the quiz is live at `https://<project>.pages.dev/`.
-4. In the Pages project, open **Custom domains → Set up a custom domain**, and enter `quiz.vmugdha.in`. Cloudflare adds the DNS record and the HTTPS certificate itself, because `vmugdha.in` is in the same account.
-5. `frontend/_headers` gives the quiz its security headers: a content security policy that allows only the Apps Script backend and Turnstile, HTTPS-only, and no framing by other sites. After the first deploy, open the quiz, press **F12**, and check that the **Console** shows no "Content Security Policy" errors.
-6. Optional: to send old links to the new address, add a rule under **Rules → Redirect Rules** for `vmugdha.in`: when the URL starts with `https://www.vmugdha.in/n8n-quiz`, redirect (301) to `https://quiz.vmugdha.in/`. Once it works, delete the old `n8n-quiz/` folder from the `mugdhav.github.io` repository.
+**To publish or update the site**, from the `quizz-solution` folder, run:
+
+```bash
+npx wrangler deploy
+```
+
+It uploads the changed files in a few seconds. The first run creates the `quiz.vmugdha.in` DNS record and HTTPS certificate. If wrangler asks you to sign in, run `npx wrangler login` first.
+
+> **Automatic deploys on every push (optional):** in the dashboard, go to **Workers & Pages → n8n-quiz → Settings → Build → Connect** and choose `mugdhav/n8n-quiz-webapp`. Leave the build command empty and the deploy command as `npx wrangler deploy`. If this fails with "Permission group … not found", create a token from the **Edit Cloudflare Workers** template under **My Profile → API Tokens**, and choose it as the build's API token.
+
+1. After a deploy, open `https://quiz.vmugdha.in/`. If your computer still says the site can't be found, its DNS cache is out of date: run `ipconfig /flushdns` or wait a few minutes.
+2. `frontend/_headers` gives the quiz its security headers: a content security policy that allows only the Apps Script backend and Turnstile, HTTPS-only, and no framing by other sites. After the first deploy, open the quiz, press **F12**, and check that the **Console** shows no "Content Security Policy" errors.
+3. Old links: a rule under **Rules → Redirect Rules** for `vmugdha.in` sends `www.vmugdha.in/n8n-quiz*` (Hostname equals `www.vmugdha.in` and URI Path starts with `/n8n-quiz`), redirecting (302 during the quiz, 301 afterwards) to `https://quiz.vmugdha.in/`. Once it works, delete the old `n8n-quiz/` folder from the `mugdhav.github.io` repository.
 
 Only `frontend/` is published. The repository is public, but `content/questions.csv` (the answers) is in `.gitignore` and never goes into it. Check that `https://quiz.vmugdha.in/content/questions.csv` returns "not found".
 
@@ -330,7 +334,7 @@ On that date:
 
 1. Export a copy if you need one, using **File → Download**. Store it securely, because it contains personal data.
 2. In **Participants** and **Responses**, delete every row from row 2 down. Keep row 1.
-3. In Apps Script, open **Deploy → Manage deployments**, select the deployment, and click **Archive**. The quiz page then stops working, so replace `frontend/index.html` with a "This quiz has closed" page and push, or delete the Cloudflare Pages project.
+3. In Apps Script, open **Deploy → Manage deployments**, select the deployment, and click **Archive**. The quiz page then stops working, so replace `frontend/index.html` with a "This quiz has closed" page and run `npx wrangler deploy`, or delete the `n8n-quiz` Worker in the Cloudflare dashboard.
 
 Any exported copy counts too. Delete it at the same time, or update the privacy notice to say how long you keep it.
 
@@ -356,7 +360,7 @@ Any exported copy counts too. Delete it at the same time, or update the privacy 
 | Update the backend code | Apps Script: **Deploy → Manage deployments → pencil → New version** |
 | See errors and step timings | Apps Script: **Executions** |
 | Code email settings | Apps Script: **Project Settings → Script properties** (`CF_EMAIL_TOKEN`, `CF_ACCOUNT_ID`, `TURNSTILE_SECRET`) |
-| Publish frontend changes | Push to `main`; Cloudflare Pages deploys `frontend/` |
+| Publish frontend changes | Push to `main`, then run `npx wrangler deploy` |
 | Score the stars | Responses tab: filter `kind` = `star`, enter 0–5 in `reviewPoints` |
 | Rankings | Leaderboard tab (private) |
 | Statistics | Summary tab |
