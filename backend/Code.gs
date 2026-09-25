@@ -627,10 +627,12 @@ function sendCode_(to, code, cfg) {
 
   const minutes = cfg.codeTtlMinutes;
   const text = 'Your code for the n8n Rapid-Fire Quiz is ' + code + '.\n\n' +
-    'It expires in ' + minutes + ' minutes. If you didn\'t ask for this code, you can ignore this email.';
+    'It expires in ' + minutes + ' minutes. If you didn\'t ask for this code, you can ignore this email.\n\n' +
+    'Do not reply to this email.';
   const html = '<p>Your code for the n8n Rapid-Fire Quiz is:</p>' +
     '<p style="font-size:28px;font-weight:700;letter-spacing:4px">' + code + '</p>' +
-    '<p>It expires in ' + minutes + ' minutes. If you didn\'t ask for this code, you can ignore this email.</p>';
+    '<p>It expires in ' + minutes + ' minutes. If you didn\'t ask for this code, you can ignore this email.</p>' +
+    '<p>Do not reply to this email.</p>';
 
   const res = UrlFetchApp.fetch('https://api.cloudflare.com/client/v4/accounts/' + encodeURIComponent(accountId) + '/email/sending/send', {
     method: 'post',
