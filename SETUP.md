@@ -7,7 +7,7 @@ This guide takes you from the files in this folder to a live quiz, then through 
 | 1 | Fill in the placeholders | 15 min |
 | 2 | Create the Google Sheet and the backend | 20 min |
 | 3 | Connect the frontend and test it on your computer | 15 min |
-| 4 | Publish on GitHub Pages | 10 min |
+| 4 | Publish on Cloudflare Pages at quiz.vmugdha.in | 10 min |
 | 5 | Test before launch | 30 min, plus the dry run |
 | 6 | Launch | 10 min |
 | 7 | Run the quiz over the two days | A few checks a day |
@@ -27,9 +27,9 @@ Decide the start and end times first. The quiz runs over two days.
 | File | What to change |
 |---|---|
 | `frontend/privacy.html` | Every highlighted `[…]` placeholder: the date, your name, how to contact you, the start and end times with time zone, and the winner announcement date and time. Then delete the `<span class="todo">` and `</span>` tags around each one. |
-| `frontend/index.html` | In the two `og:` lines near the top, replace `https://<username>.github.io/n8n-quiz/` with the address where the quiz will live (see Part 4). LinkedIn needs the full address for the link preview. |
+| `frontend/index.html` | The two `og:` lines near the top point to `https://quiz.vmugdha.in/`. Change them only if the quiz moves (see Part 4). LinkedIn needs the full address for the link preview. |
 | `launch/linkedin-post.md` | The link and the `[…]` date placeholders. |
-| `content/questions.csv` | Review the 30 multiple-choice questions (Q01–Q30) and their answers. Edit anything that doesn't match the n8n version your audience uses. Check Q10 ("Activate (publish)") and Q02 (the license question) in particular. Then review the 6 bonus questions (S01–S06), and add or change them as you like. |
+| `content/questions.csv` | This file holds the answers, so it is listed in `.gitignore` and never goes into the repository. Keep it on your computer and in the Sheet only. Review the 30 multiple-choice questions (Q01–Q30) and their answers. Edit anything that doesn't match the n8n version your audience uses. Check Q10 ("Activate (publish)") and Q02 (the license question) in particular. Then review the 6 bonus questions (S01–S06), and add or change them as you like. |
 
 The preview image `frontend/og-image.png` says "TWO-DAY QUIZ" and "10 questions · 30 seconds each · bonus ★". It has no dates, so it doesn't need changing.
 
@@ -61,7 +61,7 @@ The backend is a [Google Apps Script](https://developers.google.com/apps-script)
 3. The first time, Google asks for permission:
    1. Click **Review permissions** and choose your account.
    2. You see "Google hasn't verified this app". This is expected, because it's your own script. Click **Advanced**, then **Go to n8n Quiz Backend (unsafe)**.
-   3. Click **Allow**.
+   3. Click **Allow**. The script asks to see and edit **only this spreadsheet** (the `@OnlyCurrentDoc` line at the top of `Code.gs` limits it) and to connect to an external service (Cloudflare, for the code emails and Turnstile).
 4. Wait for "Execution completed" in the log.
 5. Go back to the Sheet. It now has these tabs: **Config**, **Questions**, **Participants**, **Responses**, **Leaderboard** and **Summary**.
 
@@ -92,12 +92,14 @@ Click the **Config** tab. `setup` has filled in defaults. Change the values in c
 | `RESULTS_MESSAGE` | The text under the score. Replace `[DATE AND TIME]` with the winner announcement date and time, for example `Fingers crossed! Wait for the winner announcement on 25 Sept at 6 PM IST.` |
 | `STAR_TIME_LIMIT` | Seconds for the bonus question. The default is 60, because it needs typing. Set it to `30` to match the other questions. |
 
+`CODE_TTL_MINUTES` (10), `CODE_MAX_ATTEMPTS` (5) and `CODE_MAX_PER_HOUR` (300) control the emailed sign-in codes: how long a code works, how many wrong tries are allowed, and how many codes can go out per hour in total. The hourly cap is a safety net: if it's reached, new sign-ups see "try again in a few minutes". If you run `setup` on an existing Sheet, it adds these keys.
+
 Leave the other keys as they are unless you want to change the timings. Write dates exactly in this form: `YYYY-MM-DDTHH:MM:SS+05:30`. The `+05:30` is the time zone offset for India, so change it if you're in a different zone.
 
 ### 2.6 Run the tests
 
 1. In Apps Script, choose `runAllTests` in the function dropdown and click **Run**.
-2. Open the **Execution log**. The last line should say `ALL 19 TESTS PASSED`.
+2. Open the **Execution log**. The last line should say `ALL 25 TESTS PASSED`. The tests don't send real emails or check Turnstile. The log also shows one `Code email failed: simulated send failure` line, which is expected.
 3. The tests add rows to Participants and Responses and delete them again at the end. Check that both tabs contain only their header row.
 
 If a test fails, copy the log and send it to Claude.
@@ -115,6 +117,30 @@ If a test fails, copy the log and send it to Claude.
 6. Paste that URL into a new browser tab. You should see `{"ok":true,"service":"n8n-quiz"}`.
 
 > **When you change the code later:** use **Deploy → Manage deployments**, click the pencil icon, set **Version** to **New version**, and click **Deploy**. This keeps the same URL. **New deployment** would create a new URL, and the quiz page would stop working until you updated it.
+
+### 2.8 Set up the sign-in code emails
+
+Before the quiz starts, each participant gets a 6-digit code by email, sent from `n8nquiz@vmugdha.in` through [Cloudflare Email Service](https://developers.cloudflare.com/email-service/). The code proves the email address belongs to them, so nobody can use up someone else's attempt. Sending to any address needs the **Workers Paid** plan ($5/month, 3,000 emails a month included).
+
+Your domain's DNS is already on Cloudflare, so you don't need to change anything at BigRock. In the [Cloudflare dashboard](https://dash.cloudflare.com/):
+
+1. **Upgrade to Workers Paid**, if you haven't already.
+2. **Compute & AI → Email Service → Email Sending → Onboard Domain**, choose `vmugdha.in`, and click **Add records and onboard**. Cloudflare adds locked records for the bounce address `cf-bounce.vmugdha.in`: three MX records, an SPF TXT record, and a DKIM TXT record at `cf-bounce._domainkey.vmugdha.in`. The root domain keeps its own MX and SPF records for Email Routing. There's one SPF record per name, which is correct, so leave both.
+3. **DMARC:** each name can have only **one** `_dmarc` TXT record, so edit the existing record rather than adding another. With `v=DMARC1; p=reject; rua=mailto:contact@vmugdha.in`, inboxes reject email that pretends to be from `vmugdha.in`, and you get reports. The code emails pass, because Cloudflare signs them for `vmugdha.in`. Keep `p=reject` only if Cloudflare is the only service that sends as `@vmugdha.in`. If you also send as `contact@vmugdha.in` from Gmail or anything else, use `p=none` until that service is set up to sign for the domain too.
+4. **Email Routing → Routing rules → Create address:** `n8nquiz@vmugdha.in` → your own inbox, so replies reach you.
+5. **Create an API token:** **My Profile → API Tokens → Create Token → Custom token**. Give it the account permission for Email Sending (send) and nothing else. Copy the token.
+6. Copy your **Account ID**. It's on the right of the account's home page.
+7. In Apps Script, open **Project Settings → Script properties** and add:
+   - `CF_EMAIL_TOKEN`: the token
+   - `CF_ACCOUNT_ID`: the account ID
+8. Send yourself a test email. From a terminal:
+   ```bash
+   npx wrangler email sending send --from n8nquiz@vmugdha.in --to YOUR-OWN-EMAIL --subject "Test" --text "Test"
+   ```
+   Check that it arrives in your inbox and not in spam. New Cloudflare accounts start with a low daily sending limit that grows over time, so do this well before launch.
+9. Set up Turnstile (see "Turnstile" at the end of this guide). It's needed now. Without it, a bot could use the public "Send code" button to make your domain email strangers.
+
+If sending fails, participants see "We couldn't send a code to this address". The reason appears under **Apps Script → Executions**, as a `Code email failed` line.
 
 ---
 
@@ -143,8 +169,8 @@ Open [http://localhost:8000](http://localhost:8000).
 
 ### 3.3 Do a full run
 
-1. The landing page should show a green "Open now" label.
-2. Sign up with your own name and email, and answer all 11 questions. The last one is marked "★ Bonus question".
+1. The landing page appears at once with "Checking whether the quiz is open…", which then changes to a green "Open now" label.
+2. Enter your own name and email and click **Send code**. The code arrives from `n8nquiz@vmugdha.in` within a minute. Enter it, tick the consent box, and click **Start the quiz**. Answer all 11 questions. The last one is marked "★ Bonus question".
 3. Reload the page on one question. The quiz should continue on the same question, and the timer shouldn't restart.
 4. Let one question time out.
 5. In the Sheet, check that:
@@ -152,41 +178,31 @@ Open [http://localhost:8000](http://localhost:8000).
    - **Responses** has 11 rows for your session. `kind` (column J) is `scored` on 10 of them and `star` on the last.
    - The finish screen showed your score, with `+ ★` if you answered the bonus question, and the announcement message.
    - **Leaderboard** lists you.
-6. Go back to the landing page and try the same email again. You should see "This email has already been used".
+6. Clear the site data (or use a private window), go back to the landing page, and try the same email again. **Send code** says a code was sent, but no email arrives, and **Start the quiz** says the code has expired. This is deliberate: the site never reveals whether an email has already taken part.
+
+To try the page without the backend, set `USE_MOCK = true` in `config.js`. The mock prints the code in the browser console (**F12 → Console**) instead of emailing it.
 
 Stop the local server with **Ctrl+C**.
 
 ---
 
-## Part 4: Publish on GitHub Pages
+## Part 4: Publish on Cloudflare Pages at quiz.vmugdha.in
 
-[GitHub Pages](https://pages.github.com/) hosts the quiz page for free. Choose one option.
+[Cloudflare Pages](https://developers.cloudflare.com/pages/) publishes the `frontend/` folder of the `mugdhav/n8n-quiz-webapp` repository at `https://quiz.vmugdha.in/`. It updates by itself every time you push to `main`. Your main site (`mugdhav.github.io`, served at `www.vmugdha.in`) doesn't change.
 
-### Option A: add it to an existing Pages site
+1. In the [Cloudflare dashboard](https://dash.cloudflare.com/), open **Workers & Pages → Create → Pages → Connect to Git**, and choose `mugdhav/n8n-quiz-webapp`.
+2. Set these build settings:
+   - **Framework preset:** None
+   - **Build command:** leave empty
+   - **Build output directory:** `frontend`
+3. Click **Save and Deploy**. After a minute, the quiz is live at `https://<project>.pages.dev/`.
+4. In the Pages project, open **Custom domains → Set up a custom domain**, and enter `quiz.vmugdha.in`. Cloudflare adds the DNS record and the HTTPS certificate itself, because `vmugdha.in` is in the same account.
+5. `frontend/_headers` gives the quiz its security headers: a content security policy that allows only the Apps Script backend and Turnstile, HTTPS-only, and no framing by other sites. After the first deploy, open the quiz, press **F12**, and check that the **Console** shows no "Content Security Policy" errors.
+6. Optional: to send old links to the new address, add a rule under **Rules → Redirect Rules** for `vmugdha.in`: when the URL starts with `https://www.vmugdha.in/n8n-quiz`, redirect (301) to `https://quiz.vmugdha.in/`. Once it works, delete the old `n8n-quiz/` folder from the `mugdhav.github.io` repository.
 
-1. Copy the contents of `frontend/` into your Pages repository, in a folder named `n8n-quiz`.
-2. Commit and push:
-   ```bash
-   git add n8n-quiz
-   ```
-   ```bash
-   git commit -m "Add n8n rapid-fire quiz"
-   ```
-   ```bash
-   git push
-   ```
-3. After about a minute, the quiz is live at `https://<username>.github.io/n8n-quiz/`, or at `https://<your-domain>/n8n-quiz/` if your site uses a custom domain.
+Only `frontend/` is published. The repository is public, but `content/questions.csv` (the answers) is in `.gitignore` and never goes into it. Check that `https://quiz.vmugdha.in/content/questions.csv` returns "not found".
 
-### Option B: use a new repository
-
-1. On GitHub, create a new **public** repository, for example `n8n-quiz`.
-2. Upload the **contents** of `frontend/` (not the folder itself) to the root of the repository.
-3. Open **Settings → Pages**. Set **Source** to **Deploy from a branch** and **Branch** to **main**, **/ (root)**. Click **Save**.
-4. After a minute or two, the quiz is live at `https://<username>.github.io/n8n-quiz/`.
-
-Only the `frontend/` files go on GitHub. `backend/`, `content/questions.csv` and `launch/` stay private, because the CSV contains the answers.
-
-If the address differs from what you put in the `og:` tags in Part 1, update `index.html` and push again.
+If the address changes, update the `og:` tags in `index.html` and push again.
 
 ---
 
@@ -208,19 +224,20 @@ Ask 3 to 5 people to take the quiz on different phones and browsers, for example
 
 ### 5.3 Optional: check it handles a rush
 
-Apps Script handles about 30 requests at the same moment. To check that 50 people starting together doesn't lose rows, open the live quiz, press **F12**, click **Console**, paste this and press **Enter**:
+Apps Script handles about 30 requests at the same moment. Signing up now needs a code emailed to a real inbox, so don't load-test `start` or `requestCode` with made-up addresses: emails that bounce harm your domain's sending reputation. Instead, check how the backend copes with 50 requests at once. Open the live quiz, press **F12**, click **Console**, paste this and press **Enter**:
 
 ```js
 const url = "PASTE-YOUR-EXEC-URL";
-const runs = Array.from({ length: 50 }, (_, i) => fetch(url, {
+const t0 = performance.now();
+const runs = Array.from({ length: 50 }, () => fetch(url, {
   method: "POST",
   headers: { "Content-Type": "text/plain" },
-  body: JSON.stringify({ action: "start", name: "Load Test " + i, email: `loadtest${i}@example.com`, consent: true, hp: "" }),
-}).then((r) => r.json()));
-Promise.all(runs).then((r) => console.table(r.map((x) => ({ ok: x.ok, error: x.error || "" }))));
+  body: JSON.stringify({ action: "status" }),
+}).then((r) => r.json()).then((x) => ({ ok: x.ok, ms: Math.round(performance.now() - t0) })));
+Promise.all(runs).then((r) => console.table(r));
 ```
 
-Most rows should say `ok: true`. A few `BUSY` errors are fine, because the real page retries them. Check that Participants has one row for each `ok: true`, with no duplicates.
+Every row should say `ok: true`. The `ms` column shows how long people would wait at a busy moment. The dry run with friends (5.1) covers several people answering at the same time.
 
 ### 5.4 Clear the test data
 
@@ -246,7 +263,7 @@ Most rows should say `ok: true`. A few `BUSY` errors are fine, because the real 
 **Check a few times a day:**
 
 - **Summary** tab: attempts started and finished, and average scores.
-- **Apps Script → Executions** (the list icon on the left): look for failed runs. A few `BUSY` responses at busy moments are normal.
+- **Apps Script → Executions** (the list icon on the left): look for failed runs and `Code email failed` lines. A few `BUSY` responses at busy moments are normal. Each `start` and `answer` also logs one `{"timing": …}` line with the milliseconds spent on each step (waiting for the lock, reading the session, writing rows, `flush`). If `flush` or the writes regularly take more than about 500 ms, the Sheet formulas are slowing answers down.
 
 **Work safely in the Sheet while the quiz is live:**
 
@@ -260,7 +277,8 @@ Most rows should say `ok: true`. A few `BUSY` errors are fine, because the real 
 |---|---|
 | You need to close the quiz early | Set `END_AT` to the current time and run `clearCaches`. People already in the middle of the quiz get 10 more minutes to finish (`FINISH_GRACE_MINUTES`). |
 | A question has a mistake | Set its `active` value to `FALSE` and run `clearCaches`. New participants won't get it. Anyone who already has it keeps their result for it. |
-| Bots are signing up | Add [Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/), a free check that tells people and bots apart. See "Optional: Turnstile" at the end of this guide. |
+| Bots are asking for codes | Check that Turnstile is on (see "Turnstile" at the end of this guide). Lower `CODE_MAX_PER_HOUR` in Config and run `clearCaches`. |
+| Someone says the code never arrived | Ask them to check spam and wait a minute before clicking **Resend code**. Check **Executions** for `Code email failed`, and the Cloudflare dashboard's **Email Sending** activity. |
 | Someone asks for their data to be deleted | Delete their rows in Participants and Responses. Search for their email with **Ctrl+F**. |
 
 The quiz closes by itself at `END_AT`.
@@ -312,20 +330,20 @@ On that date:
 
 1. Export a copy if you need one, using **File → Download**. Store it securely, because it contains personal data.
 2. In **Participants** and **Responses**, delete every row from row 2 down. Keep row 1.
-3. In Apps Script, open **Deploy → Manage deployments**, select the deployment, and click **Archive**. The quiz page then stops working, so replace it with a "This quiz has closed" page or remove it from GitHub Pages.
+3. In Apps Script, open **Deploy → Manage deployments**, select the deployment, and click **Archive**. The quiz page then stops working, so replace `frontend/index.html` with a "This quiz has closed" page and push, or delete the Cloudflare Pages project.
 
 Any exported copy counts too. Delete it at the same time, or update the privacy notice to say how long you keep it.
 
 ---
 
-## Optional: Turnstile
+## Turnstile
 
-Add this only if you see bot sign-ups.
+[Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/) is a free check that tells people and bots apart. It protects the **Send code** button, so bots can't use it to make your domain email strangers. Set it up before launch.
 
-1. In the [Cloudflare dashboard](https://dash.cloudflare.com/), open **Turnstile → Add widget**. Enter your Pages domain, for example `<username>.github.io`.
+1. In the [Cloudflare dashboard](https://dash.cloudflare.com/), open **Turnstile → Add widget**. Add the hostname `quiz.vmugdha.in`, plus `localhost` for testing.
 2. Copy the **site key** into `TURNSTILE_SITE_KEY` in `frontend/config.js`, then push to GitHub.
 3. Copy the **secret key**. In Apps Script, open **Project Settings → Script properties → Add script property**, name it `TURNSTILE_SECRET`, and paste the key.
-4. No redeploy is needed. The backend checks for the secret on every sign-up.
+4. No redeploy is needed. The backend checks the Turnstile token every time a code is requested.
 
 ---
 
@@ -336,7 +354,9 @@ Add this only if you see bot sign-ups.
 | Change dates or settings | Config tab, then run `clearCaches` |
 | Turn a question off | Questions tab: set `active` to `FALSE`, then run `clearCaches` |
 | Update the backend code | Apps Script: **Deploy → Manage deployments → pencil → New version** |
-| See errors | Apps Script: **Executions** |
+| See errors and step timings | Apps Script: **Executions** |
+| Code email settings | Apps Script: **Project Settings → Script properties** (`CF_EMAIL_TOKEN`, `CF_ACCOUNT_ID`, `TURNSTILE_SECRET`) |
+| Publish frontend changes | Push to `main`; Cloudflare Pages deploys `frontend/` |
 | Score the stars | Responses tab: filter `kind` = `star`, enter 0–5 in `reviewPoints` |
 | Rankings | Leaderboard tab (private) |
 | Statistics | Summary tab |

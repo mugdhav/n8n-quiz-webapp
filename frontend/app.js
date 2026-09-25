@@ -4,6 +4,7 @@ import { TURNSTILE_SITE_KEY } from "./config.js";
 const SESSION_KEY = "n8nQuiz.sessionId";
 const RESULT_KEY = "n8nQuiz.result";
 const WARN_AT = [10, 5];
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 const $ = (id) => document.getElementById(id);
 
@@ -13,6 +14,12 @@ const ERRORS = {
   QUIZ_CLOSED: "The quiz has closed. Thanks for your interest!",
   INVALID_INPUT: "Please check your name and email, and tick the consent box.",
   INVALID_SESSION: "We couldn't find your quiz session. Please start again.",
+  INVALID_CODE: "That code isn't right. Check the email and try again.",
+  CODE_EXPIRED: "That code has expired or has already been used. Please ask for a new code.",
+  TOO_MANY_ATTEMPTS: "Too many wrong tries. Please ask for a new code.",
+  RESEND_TOO_SOON: "A code was sent a moment ago. Please wait before asking for another.",
+  CODE_LIMIT: "Lots of people are asking for codes right now. Please try again in a few minutes.",
+  EMAIL_FAILED: "We couldn't send a code to this address. Check it and try again.",
   BUSY: "The quiz is very busy right now. Please try again in a moment.",
   NETWORK: "We couldn't reach the quiz server. Check your connection and try again.",
 };
@@ -27,6 +34,9 @@ const state = {
   warned: new Set(),
   submitting: false,
   turnstileToken: "",
+  codeEmail: "",      // the email the current code was sent to
+  resendTimerId: 0,
+  attempt: null,      // { key, id }: reused when Start is pressed again for the same email and code
 };
 
 /* ---------- Storage (may be unavailable in private mode) ---------- */
@@ -81,10 +91,14 @@ async function init() {
     try { return showFinish(JSON.parse(saved)); } catch { store.remove(RESULT_KEY); }
   }
 
+  // Show the rules and the form straight away. The status check (which also wakes up the
+  // backend) fills in the pill when it arrives; the server checks the quiz window again anyway.
+  renderLanding(null);
   const res = await call({ action: "status" });
   renderLanding(res);
 }
 
+/** status is null while the check is still on its way. */
 function renderLanding(status) {
   const pill = $("window-status");
   const form = $("signup-form");
@@ -92,8 +106,14 @@ function renderLanding(status) {
 
   form.hidden = false;
   pill.className = "status-pill";
-  if (!status.ok) {
+  $("code-btn").disabled = status === null;
+  if (status === null) {
+    pill.textContent = "Checking whether the quiz is open…";
+    pill.classList.add("wait");
+    setupTurnstile();
+  } else if (!status.ok) {
     pill.textContent = "";
+    setupTurnstile();
   } else if (status.state === "not_open") {
     pill.textContent = `Quiz opens at ${fmt(status.startAt)}`;
     pill.classList.add("wait");
@@ -112,39 +132,134 @@ function renderLanding(status) {
 
 /* ---------- Sign-up ---------- */
 
-$("signup-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
+function contactDetails() {
   const name = $("name").value.trim();
   const email = $("email").value.trim();
-  const errorEl = $("form-error");
-  errorEl.textContent = "";
-
+  $("form-error").textContent = "";
   if (name.length < 2) return formError("Please enter your name.", "name");
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return formError("Please enter a valid email address.", "email");
+  if (!EMAIL_RE.test(email)) return formError("Please enter a valid email address.", "email");
+  return { name, email };
+}
+
+/* Step 1: email a one-time code. */
+
+$("code-btn").addEventListener("click", async () => {
+  const contact = contactDetails();
+  if (!contact) return;
+  if (TURNSTILE_SITE_KEY && !state.turnstileToken) return formError("Please complete the check below the email field.");
+
+  const btn = $("code-btn");
+  btn.disabled = true;
+  btn.textContent = "Sending…";
+  const res = await call({
+    action: "requestCode", ...contact,
+    hp: $("website").value, turnstileToken: state.turnstileToken || undefined,
+  });
+  resetTurnstile(); // Turnstile tokens work only once.
+
+  if (res.ok || res.error === "RESEND_TOO_SOON") {
+    state.codeEmail = contact.email;
+    const codeEl = $("code");
+    codeEl.disabled = false;
+    codeEl.focus();
+    $("code-status").textContent = res.ok
+      ? `We've sent a 6-digit code to ${contact.email}. It expires in ${res.expiresInMinutes || 10} minutes. If you can't see it, check your spam folder.`
+      : "A code was sent to this address a moment ago. Check your inbox and spam folder, or ask for a new one when the timer ends.";
+    return startResendCountdown(res.resendAfter || 60);
+  }
+  btn.disabled = false;
+  btn.textContent = state.codeEmail ? "Resend code" : "Send code";
+  formError(ERRORS[res.error] || ERRORS.NETWORK);
+});
+
+function startResendCountdown(seconds) {
+  clearInterval(state.resendTimerId);
+  const btn = $("code-btn");
+  let left = seconds;
+  const tick = () => {
+    if (left <= 0) {
+      clearInterval(state.resendTimerId);
+      btn.disabled = false;
+      btn.textContent = "Resend code";
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = `Resend (${left}s)`;
+    left--;
+  };
+  tick();
+  state.resendTimerId = setInterval(tick, 1000);
+}
+
+// A code belongs to one email address. Changing the address starts over.
+$("email").addEventListener("input", () => {
+  if (!state.codeEmail || $("email").value.trim() === state.codeEmail) return;
+  state.codeEmail = "";
+  clearInterval(state.resendTimerId);
+  $("code").value = "";
+  $("code").disabled = true;
+  $("code-status").textContent = "";
+  $("code-btn").disabled = false;
+  $("code-btn").textContent = "Send code";
+});
+
+// Enter in the email field sends the code instead of submitting the form.
+$("email").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  e.preventDefault();
+  if (!$("code-btn").disabled) $("code-btn").click();
+});
+
+$("code").addEventListener("input", (e) => {
+  const digits = e.target.value.replace(/\D/g, "").slice(0, 6);
+  if (digits !== e.target.value) e.target.value = digits;
+});
+
+/* Step 2: start with the code. */
+
+$("signup-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const contact = contactDetails();
+  if (!contact) return;
+  if (state.codeEmail !== contact.email) return formError("Please send a code to this email address first.", "code-btn");
+  const code = $("code").value.trim();
+  if (!/^\d{6}$/.test(code)) return formError("Please enter the 6-digit code from the email.", "code");
   if (!$("consent").checked) return formError("Please tick the consent box to continue.", "consent");
-  if (TURNSTILE_SITE_KEY && !state.turnstileToken) return formError("Please complete the check above the button.");
+
+  // Pressing Start again for the same email and code reuses the attempt ID, so if the first
+  // try reached the server but its answer got lost, the server hands back the same session.
+  const key = `${contact.email}|${code}`;
+  if (state.attempt?.key !== key) state.attempt = { key, id: newId() };
 
   const btn = $("start-btn");
   btn.disabled = true;
   btn.textContent = "Starting…";
   const res = await call({
-    action: "start", name, email, consent: true,
-    hp: $("website").value, turnstileToken: state.turnstileToken || undefined,
+    action: "start", ...contact, consent: true, hp: $("website").value,
+    code, attemptId: state.attempt.id,
   });
   btn.disabled = false;
   btn.textContent = "Start the quiz";
 
   if (!res.ok) {
-    if (res.error === "INVALID_INPUT" || res.error === "ALREADY_ATTEMPTED") {
-      resetTurnstile();
-      return formError(ERRORS[res.error]);
+    if (res.error === "INVALID_CODE") return formError(ERRORS.INVALID_CODE, "code");
+    if (res.error === "CODE_EXPIRED" || res.error === "TOO_MANY_ATTEMPTS") {
+      $("code").value = "";
+      return formError(ERRORS[res.error], $("code-btn").disabled ? "code" : "code-btn");
     }
-    return showError(res.error);
+    return formError(ERRORS[res.error] || ERRORS.NETWORK);
   }
+  state.attempt = null;
   state.sessionId = res.sessionId;
   store.set(SESSION_KEY, res.sessionId);
-  showQuestion(res, res.timeLimit);
+  if (res.done) return showFinish(res);
+  showQuestion(res, res.remaining ?? res.timeLimit);
 });
+
+function newId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12);
+}
 
 function formError(msg, focusId) {
   $("form-error").textContent = msg;

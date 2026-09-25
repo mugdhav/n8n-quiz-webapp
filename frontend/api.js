@@ -1,7 +1,9 @@
 import { API_URL, USE_MOCK } from "./config.js";
 
 const MAX_RETRIES = 3;
-const REQUEST_TIMEOUT_MS = 15000;
+// Apps Script sometimes takes well over 15 s to start up. Giving up too early only
+// means the request is sent (and waited for) a second time.
+const REQUEST_TIMEOUT_MS = 30000;
 const RETRYABLE = new Set(["BUSY", "NETWORK"]);
 
 let mockModule = null;

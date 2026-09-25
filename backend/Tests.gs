@@ -21,6 +21,9 @@ const TEST_CONFIG = {
   PICK_HARD: '3',
   SHOW_SCORE: 'TRUE',
   RESULTS_MESSAGE: 'Test results message',
+  CODE_TTL_MINUTES: '10',
+  CODE_MAX_ATTEMPTS: '5',
+  CODE_MAX_PER_HOUR: '1000',
 };
 
 function testQuestionBank_() {
@@ -52,10 +55,14 @@ function runAllTests() {
   const results = [];
   const createdSessions = [];
   const createdEmails = [];
+  const createdAttempts = [];
+  const sentCodes = {}; // email (lowercase) -> last code "sent"
 
   CONFIG_OVERRIDE = TEST_CONFIG;
   QUESTIONS_OVERRIDE = testQuestionBank_();
   NOW_OVERRIDE = TEST_BASE_TIME;
+  SKIP_TURNSTILE = true;
+  SEND_CODE_OVERRIDE = (to, code) => { sentCodes[to.toLowerCase()] = code; };
 
   const test = (name, fn) => {
     try {
@@ -71,10 +78,23 @@ function runAllTests() {
     createdEmails.push(e);
     return e;
   };
-  const start = (overrides) => {
-    const res = call(Object.assign({ action: 'start', name: 'Test User', email: newEmail(), consent: true, hp: '' }, overrides || {}));
+  const requestCode = (email, overrides) =>
+    call(Object.assign({ action: 'requestCode', name: 'Test User', email, hp: '' }, overrides || {}));
+  const startWith = (body) => {
+    const res = call(Object.assign({ action: 'start', name: 'Test User', consent: true, hp: '' }, body));
     if (res.sessionId) createdSessions.push(res.sessionId);
+    if (body.attemptId) createdAttempts.push(body.attemptId);
     return res;
+  };
+  // Requests a code for a fresh email, then starts with it. Returns the first error if either step fails.
+  const start = (overrides) => {
+    const body = Object.assign({ email: newEmail() }, overrides || {});
+    const contact = {};
+    if ('name' in body) contact.name = body.name;
+    if ('hp' in body) contact.hp = body.hp;
+    const sent = requestCode(body.email, contact);
+    if (!sent.ok) return sent;
+    return startWith(Object.assign({ code: sentCodes[String(body.email).toLowerCase()] }, body));
   };
   const answer = (sessionId, questionId, text, timedOut) =>
     call({ action: 'answer', sessionId, questionId, answer: text, timedOut: !!timedOut });
@@ -242,10 +262,84 @@ function runAllTests() {
       assertEq_(/order by N desc/.test(leaderboard), true, 'Leaderboard sorts by finalScore');
     });
 
-    test('duplicate email is refused, ignoring case', () => {
+    test('a used email gets no new code, ignoring case, and cannot start again', () => {
       const email = newEmail();
       assertEq_(start({ email }).ok, true);
-      assertEq_(start({ email: email.toUpperCase() }).error, 'ALREADY_ATTEMPTED');
+      const upper = email.toUpperCase();
+      delete sentCodes[email.toLowerCase()];
+      CacheService.getScriptCache().remove('r:' + email.toLowerCase()); // skip the 60 s resend wait
+      const res = requestCode(upper);
+      assertEq_(res.ok, true, 'answer looks the same as for a new email');
+      assertEq_(sentCodes[email.toLowerCase()], undefined, 'no email is sent');
+      assertEq_(startWith({ email: upper, code: '123456' }).error, 'CODE_EXPIRED');
+    });
+
+    /* Emailed codes */
+
+    test('requestCode sends a 6-digit code that works once', () => {
+      const email = newEmail();
+      assertEq_(requestCode(email).ok, true);
+      const code = sentCodes[email];
+      assertEq_(/^\d{6}$/.test(code), true, 'code is 6 digits: ' + code);
+      assertEq_(startWith({ email, code }).ok, true);
+      assertEq_(startWith({ email, code }).error, 'CODE_EXPIRED', 'code is deleted after use');
+    });
+
+    test('start needs the code: missing, wrong and too many tries', () => {
+      const email = newEmail();
+      requestCode(email);
+      const code = sentCodes[email];
+      const wrong = code === '000000' ? '111111' : '000000';
+      assertEq_(startWith({ email }).error, 'INVALID_CODE');
+      for (let i = 1; i < 5; i++) assertEq_(startWith({ email, code: wrong }).error, 'INVALID_CODE');
+      assertEq_(startWith({ email, code: wrong }).error, 'TOO_MANY_ATTEMPTS', '5th wrong try');
+      assertEq_(startWith({ email, code }).error, 'TOO_MANY_ATTEMPTS', 'right code no longer accepted');
+    });
+
+    test('codes expire', () => {
+      const email = newEmail();
+      requestCode(email);
+      NOW_OVERRIDE += 11 * 60000;
+      assertEq_(startWith({ email, code: sentCodes[email] }).error, 'CODE_EXPIRED');
+      NOW_OVERRIDE = TEST_BASE_TIME;
+    });
+
+    test('a second code within 60 s is refused; bad input is refused', () => {
+      const email = newEmail();
+      assertEq_(requestCode(email).ok, true);
+      assertEq_(requestCode(email).error, 'RESEND_TOO_SOON');
+      assertEq_(requestCode(newEmail(), { hp: 'bot' }).error, 'INVALID_INPUT');
+      assertEq_(requestCode('not-an-email').error, 'INVALID_INPUT');
+    });
+
+    test('the hourly cap and a failed send are reported', () => {
+      CONFIG_OVERRIDE = Object.assign({}, TEST_CONFIG, { CODE_MAX_PER_HOUR: '0' });
+      assertEq_(requestCode(newEmail()).error, 'CODE_LIMIT');
+      CONFIG_OVERRIDE = TEST_CONFIG;
+
+      const email = newEmail();
+      const realSend = SEND_CODE_OVERRIDE;
+      SEND_CODE_OVERRIDE = () => { throw new Error('simulated send failure'); };
+      assertEq_(requestCode(email).error, 'EMAIL_FAILED');
+      SEND_CODE_OVERRIDE = realSend;
+      assertEq_(requestCode(email).ok, true, 'can retry at once after a failed send');
+    });
+
+    test('a retried start with the same attemptId returns the same session', () => {
+      const email = newEmail();
+      requestCode(email);
+      const code = sentCodes[email];
+      const attemptId = Utilities.getUuid();
+      const first = startWith({ email, code, attemptId });
+      assertEq_(first.ok, true);
+      NOW_OVERRIDE += 4000;
+      const retry = startWith({ email, code, attemptId });
+      assertEq_(retry.ok, true, JSON.stringify(retry));
+      assertEq_(retry.sessionId, first.sessionId);
+      assertEq_(retry.question.id, first.question.id);
+      assertEq_(retry.remaining, 26);
+      assertEq_(startWith({ email, code, attemptId: Utilities.getUuid() }).error, 'CODE_EXPIRED');
+      NOW_OVERRIDE = TEST_BASE_TIME;
     });
 
     test('timeouts and late answers score 0; the timer cannot be reset', () => {
@@ -311,10 +405,12 @@ function runAllTests() {
       CONFIG_OVERRIDE = TEST_CONFIG;
     });
   } finally {
-    cleanupTestData_(createdSessions, createdEmails);
+    cleanupTestData_(createdSessions, createdEmails, createdAttempts);
     CONFIG_OVERRIDE = null;
     QUESTIONS_OVERRIDE = null;
     NOW_OVERRIDE = null;
+    SKIP_TURNSTILE = false;
+    SEND_CODE_OVERRIDE = null;
   }
 
   const failed = results.filter((r) => r.indexOf('FAIL') === 0).length;
@@ -335,7 +431,7 @@ function assertEq_(actual, expected, msg) {
 }
 
 /** Deletes rows created by the tests, bottom-up so row numbers stay valid. */
-function cleanupTestData_(sessionIds, emails) {
+function cleanupTestData_(sessionIds, emails, attemptIds) {
   const ids = new Set(sessionIds);
   [SHEETS.RESPONSES, SHEETS.PARTICIPANTS].forEach((name) => {
     const sheet = sheet_(name);
@@ -346,5 +442,14 @@ function cleanupTestData_(sessionIds, emails) {
     }
   });
   const cache = CacheService.getScriptCache();
-  cache.removeAll(sessionIds.map((id) => 's:' + id).concat(emails.map((e) => 'e:' + e.toLowerCase())));
+  const keys = sessionIds.map((id) => 's:' + id)
+    .concat((attemptIds || []).map((id) => 'a:' + id));
+  emails.forEach((e) => {
+    const k = e.toLowerCase();
+    keys.push('e:' + k, 'v:' + k, 'r:' + k, 'rh:' + k);
+  });
+  const hour = Math.floor(TEST_BASE_TIME / 3600000);
+  keys.push('rg:' + hour, 'rg:' + (hour + 1));
+  // removeAll takes at most a few hundred keys at a time.
+  for (let i = 0; i < keys.length; i += 200) cache.removeAll(keys.slice(i, i + 200));
 }

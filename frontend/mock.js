@@ -3,11 +3,14 @@
 // so no real answers ship with the site.
 //
 // Add ?mock=not_open, ?mock=closed or ?mock=busy to the page URL to try those states.
+// Sign-in codes are printed to the browser console instead of being emailed.
 
 const TIME_LIMIT = 30;
 const STAR_TIME_LIMIT = 60;
 const GRACE_SECONDS = 5;
 const LATENCY_MS = 350;
+const RESEND_SEC = 60;
+const CODE_TTL_MIN = 10;
 const STORE_KEY = "n8nQuiz.mockDb";
 
 const BANK = [
@@ -44,6 +47,24 @@ export async function handle(body) {
     case "status":
       return { ok: true, state, startAt: startAt.toISOString(), endAt: endAt.toISOString() };
 
+    case "requestCode": {
+      if (body.hp) return fail("INVALID_INPUT");
+      const name = String(body.name || "").trim();
+      const email = String(body.email || "").trim().toLowerCase();
+      if (name.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return fail("INVALID_INPUT");
+      if (state === "not_open") return fail("QUIZ_NOT_OPEN");
+      if (state === "closed") return fail("QUIZ_CLOSED");
+      const prev = db.codes[email];
+      if (prev && now - prev.sentAt < RESEND_SEC * 1000) return fail("RESEND_TOO_SOON");
+      const sent = { ok: true, resendAfter: RESEND_SEC, expiresInMinutes: CODE_TTL_MIN };
+      if (db.emails.includes(email)) return sent; // Same answer as a new email, but nothing is "sent".
+      const code = String(Math.floor(Math.random() * 1000000)).padStart(6, "0");
+      db.codes[email] = { code, sentAt: now, tries: 0 };
+      save(db);
+      console.info(`[mock] Code for ${email}: ${code}`);
+      return sent;
+    }
+
     case "start": {
       if (body.hp || body.consent !== true) return fail("INVALID_INPUT");
       const name = String(body.name || "").trim();
@@ -51,7 +72,19 @@ export async function handle(body) {
       if (name.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return fail("INVALID_INPUT");
       if (state === "not_open") return fail("QUIZ_NOT_OPEN");
       if (state === "closed") return fail("QUIZ_CLOSED");
+      const retried = body.attemptId && db.attempts[body.attemptId];
+      if (retried && db.sessions[retried]) return { ok: true, sessionId: retried, ...stateOf(db.sessions[retried], true) };
+      const c = db.codes[email];
+      if (!/^\d{6}$/.test(String(body.code || ""))) return fail("INVALID_CODE");
+      if (!c || now - c.sentAt > CODE_TTL_MIN * 60000) return fail("CODE_EXPIRED");
+      if (c.tries >= 5) return fail("TOO_MANY_ATTEMPTS");
+      if (body.code !== c.code) {
+        c.tries++;
+        save(db);
+        return fail(c.tries >= 5 ? "TOO_MANY_ATTEMPTS" : "INVALID_CODE");
+      }
       if (db.emails.includes(email)) return fail("ALREADY_ATTEMPTED");
+      delete db.codes[email];
       const pick = (d, n) => shuffle(BANK.filter((q) => q.difficulty === d)).slice(0, n).map((q) => q.id);
       const s = {
         id: crypto.randomUUID(),
@@ -60,6 +93,7 @@ export async function handle(body) {
       };
       db.emails.push(email);
       db.sessions[s.id] = s;
+      if (body.attemptId) db.attempts[body.attemptId] = s.id;
       save(db);
       return { ok: true, sessionId: s.id, ...payload(s) };
     }
@@ -135,11 +169,9 @@ function fail(error) {
 }
 
 function load() {
-  try {
-    return JSON.parse(localStorage.getItem(STORE_KEY)) || { emails: [], sessions: {} };
-  } catch {
-    return { emails: [], sessions: {} };
-  }
+  let db = null;
+  try { db = JSON.parse(localStorage.getItem(STORE_KEY)); } catch { /* start fresh */ }
+  return { emails: [], sessions: {}, codes: {}, attempts: {}, ...db };
 }
 
 function save(db) {

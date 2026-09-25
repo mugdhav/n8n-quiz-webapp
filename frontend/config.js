@@ -3,4 +3,4 @@ export const API_URL = "https://script.google.com/macros/s/AKfycbxykuXG62B-SeZIi
 export const USE_MOCK = false;
 
 // Optional Cloudflare Turnstile site key. Leave empty to turn Turnstile off.
-export const TURNSTILE_SITE_KEY = "";
+export const TURNSTILE_SITE_KEY = "0x4AAAAAAFChYCne4kP7JqV2";

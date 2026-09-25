@@ -1,3 +1,5 @@
+/** @OnlyCurrentDoc */
+
 /**
  * n8n Rapid-Fire Quiz: Google Apps Script backend.
  *
@@ -51,6 +53,9 @@ const CONFIG_DEFAULTS = [
   ['PICK_HARD', '3', 'Hard questions per participant'],
   ['SHOW_SCORE', 'TRUE', 'Show the score (and star) on the final screen. Never includes review points.'],
   ['RESULTS_MESSAGE', 'Fingers crossed! Wait for the winner announcement on [DATE AND TIME].', 'Text on the final screen. Put in the announcement date and time.'],
+  ['CODE_TTL_MINUTES', '10', 'Minutes an emailed sign-in code stays valid'],
+  ['CODE_MAX_ATTEMPTS', '5', 'Wrong tries allowed per code'],
+  ['CODE_MAX_PER_HOUR', '300', 'Codes sent per hour across everyone. A safety cap against abuse.'],
 ];
 
 // Questions with this difficulty form the star pool. One is drawn and asked last.
@@ -62,11 +67,17 @@ const LOCK_WAIT_MS = 10000;
 const NAME_MAX = 80;
 const EMAIL_MAX = 254;
 const ANSWER_MAX = 1000;
+const CODE_FROM = { address: 'n8nquiz@vmugdha.in', name: 'n8n Rapid-Fire Quiz' };
+const CODE_RESEND_SEC = 60;
+const CODE_PER_EMAIL_PER_HOUR = 5;
 
-// Tests set these to run without touching the Config or Questions tabs.
+// Tests set these to run without touching the Config or Questions tabs,
+// without Turnstile, and without sending real email.
 var CONFIG_OVERRIDE = null;
 var QUESTIONS_OVERRIDE = null;
 var NOW_OVERRIDE = null;
+var SKIP_TURNSTILE = false;
+var SEND_CODE_OVERRIDE = null;
 
 class QuizError extends Error {
   constructor(code) {
@@ -100,6 +111,7 @@ function handleRequest_(rawBody) {
   try {
     switch (body.action) {
       case 'status': return handleStatus_();
+      case 'requestCode': return handleRequestCode_(body);
       case 'start': return handleStart_(body);
       case 'answer': return handleAnswer_(body);
       case 'resume': return handleResume_(body);
@@ -126,18 +138,75 @@ function handleStatus_() {
   return { ok: true, state, startAt: cfg.startAt.toISOString(), endAt: cfg.endAt.toISOString() };
 }
 
-function handleStart_(body) {
-  const input = validateStart_(body);
+/**
+ * Emails a one-time sign-in code. Always answers { ok: true } for a valid request, even when the
+ * email has already taken the quiz (no email is sent then), so the site can't be used to check who took part.
+ */
+function handleRequestCode_(body) {
+  const input = validateContact_(body);
   const cfg = getConfig_();
   assertWindowOpen_(cfg);
   verifyTurnstile_(body.turnstileToken);
 
+  const cache = CacheService.getScriptCache();
+  const key = input.emailNorm;
+  if (cache.get('r:' + key)) throw new QuizError('RESEND_TOO_SOON');
+  const perEmail = Number(cache.get('rh:' + key)) || 0;
+  if (perEmail >= CODE_PER_EMAIL_PER_HOUR) throw new QuizError('RESEND_TOO_SOON');
+  cache.put('r:' + key, '1', CODE_RESEND_SEC);
+  cache.put('rh:' + key, String(perEmail + 1), 3600);
+
+  const sentResponse = { ok: true, resendAfter: CODE_RESEND_SEC, expiresInMinutes: cfg.codeTtlMinutes };
+  if (emailAlreadyUsed_(key)) return sentResponse;
+
+  // Approximate: the cache has no atomic increment, which is fine for a safety cap.
+  const hourKey = 'rg:' + Math.floor(now_().getTime() / 3600000);
+  const sentThisHour = Number(cache.get(hourKey)) || 0;
+  if (sentThisHour >= cfg.codeMaxPerHour) throw new QuizError('CODE_LIMIT');
+  cache.put(hourKey, String(sentThisHour + 1), 3600);
+
+  const code = newCode_();
+  const ttlSec = cfg.codeTtlMinutes * 60;
+  cache.put('v:' + key, JSON.stringify({ h: codeHash_(code, key), a: 0, exp: now_().getTime() + ttlSec * 1000 }), ttlSec);
+  try {
+    sendCode_(input.email, code, cfg);
+  } catch (err) {
+    console.error('Code email failed: ' + (err && err.message ? err.message : err));
+    cache.removeAll(['v:' + key, 'r:' + key]);
+    throw new QuizError('EMAIL_FAILED');
+  }
+  return sentResponse;
+}
+
+function handleStart_(body) {
+  const input = validateStart_(body);
+  const attemptId = cleanId_(body.attemptId);
+  const cfg = getConfig_();
+  assertWindowOpen_(cfg);
+  const cache = CacheService.getScriptCache();
+
+  // A retried start (for example after a slow response timed out in the browser) gets its own session back.
+  if (attemptId) {
+    const existing = cache.get('a:' + attemptId);
+    if (existing) {
+      const session = loadSession_(existing, false);
+      if (session.emailNorm === input.emailNorm) {
+        return Object.assign({ ok: true, sessionId: session.sessionId }, stateResponse_(session, cfg, getQuestions_(), true));
+      }
+    }
+  }
+
+  const timer = stepTimer_('start');
+  verifyCode_(input.emailNorm, body.code, cfg);
+
   const questions = getQuestions_();
   const questionIds = pickQuestionIds_(questions, cfg);
   if (questionIds.length === 0) throw new Error('Question bank is empty');
+  timer.mark('prep');
 
   return withLock_(() => {
     if (emailAlreadyUsed_(input.emailNorm)) throw new QuizError('ALREADY_ATTEMPTED');
+    timer.mark('emailCheck');
 
     const now = now_();
     const session = {
@@ -163,12 +232,14 @@ function handleStart_(body) {
     ]);
     session.row = sheet.getLastRow();
 
-    const cache = CacheService.getScriptCache();
     cache.put('e:' + input.emailNorm, '1', CACHE_TTL_SEC);
+    cache.remove('v:' + input.emailNorm);
+    if (attemptId) cache.put('a:' + attemptId, session.sessionId, CACHE_TTL_SEC);
     putSession_(session);
+    timer.mark('writeRow');
 
     return Object.assign({ ok: true, sessionId: session.sessionId }, questionPayload_(session, cfg, questions));
-  });
+  }, timer);
 }
 
 function handleAnswer_(body) {
@@ -178,12 +249,15 @@ function handleAnswer_(body) {
   const answer = typeof body.answer === 'string' ? body.answer.slice(0, ANSWER_MAX) : '';
   const timedOut = body.timedOut === true;
 
+  const timer = stepTimer_('answer');
   const cfg = getConfig_();
   assertCanContinue_(cfg);
   const questions = getQuestions_();
+  timer.mark('prep');
 
   return withLock_(() => {
     const session = loadSession_(sessionId, true);
+    timer.mark('loadSession');
     const expectedId = session.questionIds[session.currentIndex - 1];
 
     // Retried request for a question that was already recorded: return the current state.
@@ -214,6 +288,7 @@ function handleAnswer_(body) {
       new Date(now), session.sessionId, safeCell_(session.email), session.currentIndex, questionId,
       safeCell_(answer), correct ? 1 : 0, round1_(elapsedSec), late, star ? 'star' : 'scored',
     ]);
+    timer.mark('appendRow');
 
     const finished = session.currentIndex >= session.questionIds.length;
     if (finished) {
@@ -225,9 +300,10 @@ function handleAnswer_(body) {
     }
     writeSessionRow_(session);
     putSession_(session);
+    timer.mark('writeRow');
 
     return stateResponse_(session, cfg, questions, false);
-  });
+  }, timer);
 }
 
 function handleResume_(body) {
@@ -294,9 +370,14 @@ function timeLimitFor_(question, cfg) {
 /* ------------------------------------------------------------------ */
 
 function validateStart_(body) {
+  if (body.consent !== true) throw new QuizError('INVALID_INPUT');
+  return validateContact_(body);
+}
+
+/** Name, email and the honeypot. Shared by requestCode and start. */
+function validateContact_(body) {
   // Honeypot: real users never see this field, bots tend to fill it in.
   if (body.hp) throw new QuizError('INVALID_INPUT');
-  if (body.consent !== true) throw new QuizError('INVALID_INPUT');
 
   const name = typeof body.name === 'string' ? body.name.replace(/\s+/g, ' ').trim() : '';
   const email = typeof body.email === 'string' ? body.email.trim() : '';
@@ -463,15 +544,107 @@ function writeSessionRow_(session) {
     ]]);
 }
 
-function withLock_(fn) {
+function withLock_(fn, timer) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(LOCK_WAIT_MS)) throw new QuizError('BUSY');
+  if (timer) timer.mark('lockWait');
   try {
     const result = fn();
     SpreadsheetApp.flush();
+    if (timer) timer.mark('flush');
     return result;
   } finally {
     lock.releaseLock();
+    if (timer) timer.log();
+  }
+}
+
+/**
+ * Records how long each step of a request takes, as one log line per request
+ * (Apps Script > Executions). Logs only step names and milliseconds, never user data.
+ */
+function stepTimer_(action) {
+  const t0 = Date.now();
+  let last = t0;
+  const steps = {};
+  return {
+    mark(name) {
+      const t = Date.now();
+      steps[name] = t - last;
+      last = t;
+    },
+    log() {
+      console.log(JSON.stringify(Object.assign({ timing: action }, steps, { total: Date.now() - t0 })));
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Emailed sign-in codes                                               */
+/* ------------------------------------------------------------------ */
+
+/** A 6-digit code from a random UUID (SecureRandom), not Math.random. */
+function newCode_() {
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, Utilities.getUuid() + Utilities.getUuid());
+  const n = (((bytes[0] & 0xff) << 24) >>> 0) + ((bytes[1] & 0xff) << 16) + ((bytes[2] & 0xff) << 8) + (bytes[3] & 0xff);
+  return String(n % 1000000).padStart(6, '0');
+}
+
+function codeHash_(code, emailNorm) {
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, code + '|' + emailNorm, Utilities.Charset.UTF_8);
+  return bytes.map((b) => ((b & 0xff) + 0x100).toString(16).slice(1)).join('');
+}
+
+/** Throws unless `code` matches the latest code sent to this email. Wrong tries are counted. */
+function verifyCode_(emailNorm, code, cfg) {
+  const given = typeof code === 'string' ? code.trim() : '';
+  if (!/^\d{6}$/.test(given)) throw new QuizError('INVALID_CODE');
+
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get('v:' + emailNorm);
+  if (!raw) throw new QuizError('CODE_EXPIRED');
+  const v = JSON.parse(raw);
+  const leftMs = v.exp - now_().getTime();
+  if (leftMs <= 0) {
+    cache.remove('v:' + emailNorm);
+    throw new QuizError('CODE_EXPIRED');
+  }
+  if (v.a >= cfg.codeMaxAttempts) throw new QuizError('TOO_MANY_ATTEMPTS');
+  if (codeHash_(given, emailNorm) !== v.h) {
+    v.a += 1;
+    cache.put('v:' + emailNorm, JSON.stringify(v), Math.max(1, Math.ceil(leftMs / 1000)));
+    throw new QuizError(v.a >= cfg.codeMaxAttempts ? 'TOO_MANY_ATTEMPTS' : 'INVALID_CODE');
+  }
+}
+
+/** Sends the code through Cloudflare Email Sending. Needs the CF_EMAIL_TOKEN and CF_ACCOUNT_ID script properties. */
+function sendCode_(to, code, cfg) {
+  if (SEND_CODE_OVERRIDE) return SEND_CODE_OVERRIDE(to, code);
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty('CF_EMAIL_TOKEN');
+  const accountId = props.getProperty('CF_ACCOUNT_ID');
+  if (!token || !accountId) throw new Error('CF_EMAIL_TOKEN or CF_ACCOUNT_ID script property is missing');
+
+  const minutes = cfg.codeTtlMinutes;
+  const text = 'Your code for the n8n Rapid-Fire Quiz is ' + code + '.\n\n' +
+    'It expires in ' + minutes + ' minutes. If you didn\'t ask for this code, you can ignore this email.';
+  const html = '<p>Your code for the n8n Rapid-Fire Quiz is:</p>' +
+    '<p style="font-size:28px;font-weight:700;letter-spacing:4px">' + code + '</p>' +
+    '<p>It expires in ' + minutes + ' minutes. If you didn\'t ask for this code, you can ignore this email.</p>';
+
+  const res = UrlFetchApp.fetch('https://api.cloudflare.com/client/v4/accounts/' + encodeURIComponent(accountId) + '/email/sending/send', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + token },
+    payload: JSON.stringify({ to, from: CODE_FROM, subject: code + ' is your n8n quiz code', text, html }),
+    muteHttpExceptions: true,
+  });
+  const status = res.getResponseCode();
+  let data = {};
+  try { data = JSON.parse(res.getContentText()); } catch (err) { /* treated as failure below */ }
+  const bounced = data.result && data.result.permanent_bounces && data.result.permanent_bounces.length > 0;
+  if (status < 200 || status >= 300 || !data.success || bounced) {
+    throw new Error('Cloudflare email API: HTTP ' + status + ' ' + JSON.stringify(data.errors || []) + (bounced ? ' (permanent bounce)' : ''));
   }
 }
 
@@ -481,6 +654,7 @@ function withLock_(fn) {
 
 /** Runs only when the TURNSTILE_SECRET script property is set. */
 function verifyTurnstile_(token) {
+  if (SKIP_TURNSTILE) return;
   const secret = PropertiesService.getScriptProperties().getProperty('TURNSTILE_SECRET');
   if (!secret) return;
   if (typeof token !== 'string' || !token) throw new QuizError('INVALID_INPUT');
@@ -529,6 +703,9 @@ function getConfig_() {
     pickHard: num('PICK_HARD', 3),
     showScore: String(raw.SHOW_SCORE).toUpperCase() === 'TRUE',
     resultsMessage: raw.RESULTS_MESSAGE || 'Thanks for playing!',
+    codeTtlMinutes: num('CODE_TTL_MINUTES', 10),
+    codeMaxAttempts: num('CODE_MAX_ATTEMPTS', 5),
+    codeMaxPerHour: num('CODE_MAX_PER_HOUR', 300),
   };
   if (isNaN(cfg.startAt.getTime()) || isNaN(cfg.endAt.getTime())) throw new Error('START_AT or END_AT is not a valid date');
   return cfg;

@@ -6,15 +6,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>n8n Rapid-Fire Quiz</title>
   <meta name="description"
-    content="10 rapid-fire questions, 30 seconds each, plus a bonus question. How well do you know n8n? Open for two days.">
+    content="10 rapid-fire questions, 30 seconds each, plus a bonus question. How well do you know n8n? Open until Sunday 27 September, 4 PM IST.">
 
-  <!-- Open Graph tags for the LinkedIn link preview. Replace <username> with your Pages URL; LinkedIn needs absolute URLs. -->
+  <!-- Open Graph tags for the LinkedIn link preview. LinkedIn needs absolute URLs. -->
   <meta property="og:type" content="website">
   <meta property="og:title" content="n8n Rapid-Fire Quiz">
   <meta property="og:description"
-    content="10 rapid-fire questions, 30 seconds each, plus a bonus question. How well do you know n8n? Open for two days.">
-  <meta property="og:url" content="https://<username>.github.io/n8n-quiz/">
-  <meta property="og:image" content="https://<username>.github.io/n8n-quiz/og-image.png">
+    content="10 rapid-fire questions, 30 seconds each, plus a bonus question. How well do you know n8n? Open until Sunday 27 September, 4 PM IST.">
+  <meta property="og:url" content="https://quiz.vmugdha.in/">
+  <meta property="og:image" content="https://quiz.vmugdha.in/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="627">
   <meta name="twitter:card" content="summary_large_image">
@@ -22,7 +22,12 @@
   <meta name="color-scheme" content="light dark">
   <link rel="icon"
     href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <!-- Start the connections to the Apps Script backend (and its redirect host) while the page loads. -->
+  <link rel="preconnect" href="https://script.google.com" crossorigin>
+  <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
   <link rel="stylesheet" href="style.css">
+  <link rel="modulepreload" href="api.js">
+  <link rel="modulepreload" href="config.js">
   <script type="module" src="app.js"></script>
 </head>
 
@@ -54,7 +59,7 @@
         <li>You get 10 questions at mixed difficulty. Each correct answer is worth 1 point.</li>
         <li>The last question is a bonus question that you answer in your own words. Answer it to earn a ★.</li>
         <li>Every question has a timer. When it runs out, the quiz moves on.</li>
-        <li>You can only take the quiz once with each email address.</li>
+        <li>You can only take the quiz once with each email address. We email you a 6-digit code to confirm the address is yours. The timer starts only after you enter it.</li>
         <li>If you reload the page, you continue where you left off. The timer keeps running.</li>
         <li>You see your score as soon as you finish. Winners are announced after the quiz closes.</li>
       </ul>
@@ -65,8 +70,18 @@
           <input id="name" name="name" type="text" autocomplete="name" maxlength="80" required>
         </div>
         <div class="field">
-          <label for="email">Email</label>
-          <input id="email" name="email" type="email" autocomplete="email" inputmode="email" maxlength="254" required>
+          <label for="email">Enter your actual email address. If you are a winner, we'll send your prize details here.</label>
+          <div class="inline">
+            <input id="email" name="email" type="email" autocomplete="email" inputmode="email" maxlength="254" required>
+            <button id="code-btn" class="btn secondary" type="button">Send code</button>
+          </div>
+        </div>
+        <div id="turnstile" class="turnstile"></div>
+        <div class="field">
+          <label for="code">Code from the email</label>
+          <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code"
+            maxlength="6" pattern="[0-9]{6}" aria-describedby="code-status" disabled>
+          <p id="code-status" class="muted small field-note" aria-live="polite"></p>
         </div>
         <!-- Honeypot: hidden from people, often filled in by bots. -->
         <div class="hp" aria-hidden="true">
@@ -78,7 +93,6 @@
           <label for="consent">I agree to my name, email and answers being stored to run this quiz, as described in the
             <a href="privacy.html" target="_blank" rel="noopener">privacy notice and rules</a>.</label>
         </div>
-        <div id="turnstile" class="turnstile"></div>
         <p id="form-error" class="form-error" role="alert"></p>
         <button id="start-btn" class="btn primary" type="submit">Start the quiz</button>
       </form>

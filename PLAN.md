@@ -1,12 +1,12 @@
 # n8n Rapid-Fire Quiz: Implementation Plan
 
-A timed online quiz about [n8n](https://n8n.io), shared through LinkedIn and hosted on GitHub Pages. It runs over two days, is open to anyone with the link, and costs nothing to operate.
+A timed online quiz about [n8n](https://n8n.io), shared through LinkedIn and hosted on Cloudflare Pages at `https://quiz.vmugdha.in/`. It runs over two days and is open to anyone with the link. The only running cost is the Cloudflare Workers Paid plan ($5/month), which is needed to email sign-in codes.
 
 Step-by-step setup instructions are in [`SETUP.md`](SETUP.md).
 
 ## 1. Requirements
 
-- Participants sign up with a name and an email address. Each email gets one attempt.
+- Participants sign up with a name and an email address, which they confirm with a 6-digit code sent to it. Each email gets one attempt.
 - There is no limit on the number of participants.
 - Each participant gets 11 questions, each on a timer:
   - 10 multiple-choice (MCQ) questions drawn at random from a bank of 30: 4 easy, 3 medium and 3 hard, in random order. Each correct answer is worth 1 point.
@@ -20,24 +20,27 @@ Step-by-step setup instructions are in [`SETUP.md`](SETUP.md).
 ## 2. Architecture
 
 ```
-LinkedIn post ──► GitHub Pages (static HTML/CSS/JS)
+LinkedIn post ──► Cloudflare Pages: quiz.vmugdha.in (static HTML/CSS/JS from frontend/)
                         │  fetch() POST, Content-Type: text/plain
                         ▼
               Google Apps Script web app (backend)
-              - question selection, timer checks, scoring
-              - CacheService for fast session lookups
-                        │
-                        ▼
-              Google Sheet (private to the quizmaster)
-              Config | Questions | Participants | Responses | Leaderboard | Summary
+              - sign-in codes, question selection, timer checks, scoring
+              - CacheService for fast session lookups and codes
+                        │                         │
+                        ▼                         ▼
+              Google Sheet (private)      Cloudflare Email Sending
+              Config | Questions |        (code emails from n8nquiz@vmugdha.in)
+              Participants | Responses |
+              Leaderboard | Summary
 ```
 
 | Layer | Technology | Cost |
 |---|---|---|
-| Frontend hosting | [GitHub Pages](https://pages.github.com/) | Free |
+| Frontend hosting | [Cloudflare Pages](https://developers.cloudflare.com/pages/), deployed from the public `mugdhav/n8n-quiz-webapp` repo | Free |
 | Backend | [Google Apps Script](https://developers.google.com/apps-script) web app, running as the quizmaster | Free |
 | Database | Google Sheets | Free |
-| Bot protection (optional) | [Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/) | Free |
+| Sign-in code emails | [Cloudflare Email Service](https://developers.cloudflare.com/email-service/) (REST API, called from Apps Script) | Workers Paid, $5/month |
+| Bot protection | [Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/) on "Send code" | Free |
 
 **Security rule:** the answer key, question selection, timing and scoring all stay on the server. The browser only ever receives the current question, without its answer. The Sheet, including the Leaderboard, is never shared.
 
@@ -57,18 +60,39 @@ Called when the page loads, so the landing screen can show "Quiz opens at …" o
 { "ok": true, "state": "open", "startAt": "2026-09-21T03:30:00.000Z", "endAt": "2026-09-23T03:30:00.000Z" }
 ```
 
+The page shows the rules and the sign-up form straight away and fills in the status when the reply arrives. The server checks the quiz window again on `requestCode` and `start`.
+
+### `requestCode`
+
+Emails a 6-digit sign-in code to the address.
+
+```json
+// Request. turnstileToken is sent when Turnstile is turned on.
+{ "action": "requestCode", "name": "Asha Rao", "email": "asha@example.com", "hp": "", "turnstileToken": "..." }
+
+// Response
+{ "ok": true, "resendAfter": 60, "expiresInMinutes": 10 }
+```
+
+- The answer is the same when the email has already taken the quiz, but then no email is sent. The site never reveals who took part.
+- Limits: one code every 60 seconds and 5 an hour for each email (`RESEND_TOO_SOON`), plus `CODE_MAX_PER_HOUR` across everyone (`CODE_LIMIT`). If sending fails, the answer is `EMAIL_FAILED`.
+- Only a SHA-256 hash of the code is kept in the script cache, for `CODE_TTL_MINUTES`.
+- `hp` is a hidden honeypot field. Real users leave it empty, and bots usually fill it in.
+
 ### `start`
 
 ```json
-// Request. turnstileToken is sent only when Turnstile is turned on.
-{ "action": "start", "name": "Asha Rao", "email": "asha@example.com", "consent": true, "hp": "" }
+// Request. attemptId is created once per Start press and reused on retries.
+{ "action": "start", "name": "Asha Rao", "email": "asha@example.com", "consent": true, "hp": "",
+  "code": "482913", "attemptId": "uuid" }
 
 // Success
 { "ok": true, "sessionId": "uuid", "index": 1, "total": 11, "timeLimit": 30,
   "question": { "id": "Q07", "type": "mcq", "text": "...", "options": ["A", "B", "C", "D"] } }
 ```
 
-`hp` is a hidden honeypot field. Real users leave it empty, and bots usually fill it in.
+- The code must match the latest one sent to the email, before it expires. `CODE_MAX_ATTEMPTS` wrong tries are allowed. The code is deleted once it has been used.
+- **A retried start is safe.** If the same `attemptId` arrives again (for example after a slow response timed out in the browser), the server returns the same session, with `remaining` seconds, instead of `ALREADY_ATTEMPTED`.
 
 ### `answer`
 
@@ -104,10 +128,11 @@ Used after a page reload. The `sessionId` is kept in `localStorage`.
 ### Errors
 
 ```json
-{ "ok": false, "error": "ALREADY_ATTEMPTED" | "QUIZ_NOT_OPEN" | "QUIZ_CLOSED" | "INVALID_INPUT" | "INVALID_SESSION" | "BUSY" }
+{ "ok": false, "error": "ALREADY_ATTEMPTED" | "QUIZ_NOT_OPEN" | "QUIZ_CLOSED" | "INVALID_INPUT" | "INVALID_SESSION" | "BUSY"
+  | "INVALID_CODE" | "CODE_EXPIRED" | "TOO_MANY_ATTEMPTS" | "RESEND_TOO_SOON" | "CODE_LIMIT" | "EMAIL_FAILED" }
 ```
 
-The frontend retries `BUSY` and network errors up to 3 times, with a growing delay between attempts (backoff).
+The frontend retries `BUSY` and network errors up to 3 times, with a growing delay between attempts (backoff). It waits up to 30 seconds for each request, because Apps Script sometimes takes more than 15 seconds to start up.
 
 ## 4. Data model (Google Sheet tabs)
 
@@ -241,7 +266,9 @@ quizz-solution/
 ├── backend/
 │   ├── Code.gs          # doPost, status/start/answer/resume, scoring, setup(), clearCaches()
 │   └── Tests.gs         # runAllTests()
-├── frontend/            # the only folder published to GitHub Pages
+├── .gitignore           # keeps content/questions.csv (the answers) out of the public repo
+├── frontend/            # the only folder published (Cloudflare Pages, quiz.vmugdha.in)
+│   ├── _headers         # security headers (CSP, HSTS) for Cloudflare Pages
 │   ├── index.html
 │   ├── privacy.html
 │   ├── style.css
@@ -251,7 +278,7 @@ quizz-solution/
 │   ├── app.js           # screens, timer, flow
 │   └── og-image.png     # 1200×627 link preview for LinkedIn
 ├── content/
-│   └── questions.csv    # contains the answers; never publish it
+│   └── questions.csv    # contains the answers; gitignored, never published
 └── launch/
     └── linkedin-post.md # launch post, reminder, winner announcement
 ```
@@ -261,8 +288,10 @@ quizz-solution/
 | Risk | Mitigation |
 |---|---|
 | Apps Script handles about 30 requests at the same moment | Each request takes under a second. The client retries `BUSY` and network errors with backoff. If traffic grows well beyond this, move the backend to Cloudflare Workers + D1 (Cloudflare's SQL database); the frontend stays the same apart from `API_URL`. |
-| Slow responses (Apps Script takes 1 to 2 seconds) | The frontend timer starts when a question is shown. The server allows `GRACE_SECONDS` of extra time. |
-| Fake or throwaway emails | One attempt per email, a honeypot field, optional Turnstile, and manual checks of winners. |
+| Slow responses (measured 1.9 to 20 seconds per call on 2026-09-24, mostly Apps Script starting up, plus a redirect to `script.googleusercontent.com`) | The frontend timer starts when a question is shown, and the server allows `GRACE_SECONDS` of extra time. The landing page no longer waits for `status`. Preconnect hints, a 30-second request timeout and safe `start` retries help too. Each `start` and `answer` logs its step timings to **Executions**. Removing the Apps Script wait completely means moving the backend to Cloudflare Workers + D1. |
+| Fake or throwaway emails | An emailed 6-digit code proves the participant owns the address. There's also one attempt per email, a honeypot field, Turnstile on "Send code", and manual checks of winners. |
+| Someone uses up another person's attempt | Not possible without access to that inbox, because of the code. The site gives the same answer whether or not an email has already been used. |
+| The "Send code" button is abused to send email | Turnstile, limits per email (1 a minute, 5 an hour), and a cap per hour across everyone (`CODE_MAX_PER_HOUR`). |
 | Answers leaking to the browser | The server never sends `answer` or `accepted`. Check this in V3. |
 | Star points or rankings leaking | They exist only in the private Sheet. The API never returns `finalScore`, `reviewPoints` or rank. |
 | Two people writing at the same moment | `LockService` around every write. |
@@ -287,6 +316,7 @@ quizz-solution/
 | A1 Question bank | Drafted: 30 MCQ (10/10/10) and 6 bonus questions | Structure check: 4 options each, answer among the options, positions spread across A to D. **A2 still needs your review.** |
 | B1–B6 Backend | Done | `runAllTests`: 19 of 19 pass in a local simulation of Apps Script. Sheet formulas need checking in real Google Sheets (`SETUP.md` part 3). |
 | C1–C4 Frontend | Done | Headless Chrome at phone width against `mock.js`: 16 of 16 checks pass |
+| Email codes, faster page load, safe `start` retries, step timings (2026-09-24) | Done | `runAllTests`: 25 of 25 pass in a local simulation of Apps Script. Headless Chrome at 375 px against `mock.js` with the `_headers` CSP applied: 19 of 19 checks pass. **Still to do:** run `runAllTests` in real Apps Script, set up Cloudflare email sending (`SETUP.md` 2.8), and do a real run with your own inbox. |
 | D1 Sheet formulas | Done | Created by `setup()` |
 | E1 Privacy and rules | Drafted, with highlighted placeholders to fill in | — |
 | E2 LinkedIn posts and preview image | Drafted | — |
