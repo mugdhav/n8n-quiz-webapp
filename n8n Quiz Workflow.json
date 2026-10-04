@@ -6,8 +6,6 @@
         "jsCode": "// Normalise the entry before looking the email up in the data tables.\nconst entry = $('Entry Form1').first().json;\nconst name = String(entry['Name'] || '').trim();\nconst email = String(entry['Email'] || '').trim();\nconst valid = !!name && name.length <= 100 && email.length <= 254 && /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email);\nreturn [{ json: { valid, name, email, emailNorm: valid ? email.toLowerCase() : '(invalid)' } }];"
       },
       "id": "5499371f-fab0-4c11-8a6b-a56c187b3ded",
-      "notesInFlow": true,
-      "notes": "Trims and validates the name and email.",
       "name": "Prepare Entry",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -377,8 +375,6 @@
         }
       },
       "id": "3a95f761-886e-40b9-955e-cd1ffc3d673f",
-      "notesInFlow": true,
-      "notes": "Page 2: the participant types the emailed code. A wrong code loops back here.",
       "name": "Code Form",
       "type": "n8n-nodes-base.form",
       "typeVersion": 2.5,
@@ -618,8 +614,6 @@
         "options": {}
       },
       "id": "2c90eb77-d53c-4798-8f12-006e96ccebc7",
-      "notesInFlow": true,
-      "notes": "Saves the number of tries and whether the code is used up.",
       "name": "Update Code Row",
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
@@ -730,8 +724,6 @@
         }
       },
       "id": "92f557f7-e727-4897-9c01-0f144dcc2e66",
-      "notesInFlow": true,
-      "notes": "End page for every rejection: bad input, limits, send failure, expired code, already taken.",
       "name": "Error Page",
       "type": "n8n-nodes-base.form",
       "typeVersion": 2.5,
@@ -917,8 +909,6 @@
         "options": {}
       },
       "id": "25e293c8-d905-4e37-8b5c-cddb48aab6ee",
-      "notesInFlow": true,
-      "notes": "On a timeout no browser is waiting, so the result page is skipped.",
       "name": "Page Waiting?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
@@ -1068,8 +1058,6 @@
         }
       },
       "id": "4d7320ee-c9e2-42e1-83d2-e9721a7fac8e",
-      "notesInFlow": true,
-      "notes": "Start: the public sign-up page. Takes name and email.",
       "name": "Entry Form1",
       "type": "n8n-nodes-base.formTrigger",
       "typeVersion": 2.6,
@@ -1364,8 +1352,6 @@
         "jsCode": "// ---- shared helpers ----\nfunction utf8Bytes(str) {\n  const out = [];\n  for (const ch of str) {\n    let c = ch.codePointAt(0);\n    if (c < 0x80) out.push(c);\n    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));\n    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));\n    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));\n  }\n  return out;\n}\n// SHA-256 in plain JS, so it works whatever the Code node sandbox allows.\nfunction sha256(str) {\n  const primes = [];\n  for (let n = 2; primes.length < 64; n++) if (primes.every((p) => n % p)) primes.push(n);\n  const frac = (x) => Math.floor((x - Math.floor(x)) * 4294967296);\n  const K = primes.map((p) => frac(Math.cbrt(p)));\n  const H = primes.slice(0, 8).map((p) => frac(Math.sqrt(p)));\n  const bytes = utf8Bytes(str);\n  const bitLen = bytes.length * 8;\n  bytes.push(0x80);\n  while (bytes.length % 64 !== 56) bytes.push(0);\n  for (let i = 7; i >= 0; i--) bytes.push(i >= 4 ? 0 : (bitLen >>> (i * 8)) & 255);\n  const rotr = (x, n) => (x >>> n) | (x << (32 - n));\n  for (let off = 0; off < bytes.length; off += 64) {\n    const w = new Array(64);\n    for (let i = 0; i < 16; i++) {\n      w[i] = ((bytes[off + 4 * i] << 24) | (bytes[off + 4 * i + 1] << 16) | (bytes[off + 4 * i + 2] << 8) | bytes[off + 4 * i + 3]) | 0;\n    }\n    for (let i = 16; i < 64; i++) {\n      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);\n      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);\n      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;\n    }\n    let [a, b, c, d, e, f, g, h] = H;\n    for (let i = 0; i < 64; i++) {\n      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);\n      const t1 = (h + S1 + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0;\n      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);\n      const t2 = (S0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;\n      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;\n    }\n    [a, b, c, d, e, f, g, h].forEach((v, i) => { H[i] = (H[i] + v) | 0; });\n  }\n  return H.map((v) => (v >>> 0).toString(16).padStart(8, '0')).join('');\n}\nfunction randomInt(max) {\n  try { const a = new Uint32Array(1); crypto.getRandomValues(a); return a[0] % max; }\n  catch (e) { return Math.floor(Math.random() * max); }\n}\nconst codeHash = (code, emailNorm) => sha256(code + '|' + emailNorm);\n// Data Table nodes emit one empty item when nothing matched (alwaysOutputData); drop those.\nconst rows = (items) => items.map((i) => i.json).filter((r) => r && Object.keys(r).length);\n// Stop a leading = + - @ being read as a formula if the data is ever exported to a spreadsheet.\nconst safeCell = (s) => (/^[=+\\-@\\t\\r]/.test(s) ? \"'\" + s : s);\nconst MSG = {\n  INVALID_INPUT: ['Check your details', 'Please enter your name and a valid email address, then try again.'],\n  RESEND_TOO_SOON: ['Please wait a moment', 'A code was sent to this address recently. Check your inbox and spam folder, wait a minute, then reload this page to ask for another.'],\n  CODE_LIMIT: ['Busy right now', 'Lots of people are signing up at once. Please try again in a few minutes.'],\n  EMAIL_FAILED: [\"We couldn't send a code\", \"We couldn't send a code to this address. Check it for typos and try again in a few minutes.\"],\n  CODE_EXPIRED: ['Code expired', 'That code has expired or was never sent. Reload this page to get a new one.'],\n  TOO_MANY_ATTEMPTS: ['Too many wrong tries', 'Too many wrong codes. Reload this page to request a new code.'],\n  ALREADY_ATTEMPTED: ['Already taken', 'This email address has already taken the quiz. Each email gets one attempt.'],\n};\n// Turn question rows (qid, type, difficulty, text, options, answer, active) into a question bank.\n// n8n Data Tables reserve the column name id, so the question id column is called qid.\nfunction parseBank(rows) {\n  const bank = [];\n  for (const r of rows) {\n    const id = String(r.qid ?? '').trim();\n    if (!id || String(r.active ?? 'TRUE').trim().toUpperCase() === 'FALSE') continue;\n    const type = String(r.type ?? '').trim().toLowerCase();\n    const q = {\n      id,\n      type,\n      difficulty: String(r.difficulty ?? '').trim().toLowerCase(),\n      text: String(r.text ?? '').trim(),\n      options: String(r.options ?? '').split('|').map((o) => o.trim()).filter(Boolean),\n      answer: String(r.answer ?? '').trim(),\n    };\n    if (!q.text) continue;\n    // Skip malformed MCQs: the quiz page has four answer choices per question, and the answer must be one of them.\n    if (type === 'mcq' && (q.options.length !== 4 || !q.options.includes(q.answer))) continue;\n    if (type === 'mcq' || type === 'text') bank.push(q);\n  }\n  return bank;\n}\n\n// Answer check: compare each submitted option with the answer in the question table.\n// If the Wait node timed out instead, nothing was submitted and every answer counts as blank.\n// The Wait node only notices an expired limit about once a minute, so the deadline is checked here too:\n// answers that arrive after the deadline (plus a short grace for network delay, as in Code.gs) score 0.\nconst GRACE_MS = 5000;\nconst bank = parseBank($('Get Questions1').all().map((i) => i.json));\nconst pick = $('Pick Questions1').first().json;\nconst submitted = $input.first().json;\nconst answered = submitted[pick.questions[0].label] !== undefined;\nconst onTime = Date.now() <= Date.parse(pick.deadlineIso) + GRACE_MS;\nconst status = !answered ? 'timeout' : onTime ? 'done' : 'late';\n\nconst byId = Object.fromEntries(bank.map((q) => [q.id, q]));\nlet score = 0;\nif (status === 'done') {\n  for (const q of pick.questions) {\n    const given = String(submitted[q.label] ?? '').trim();\n    if (given !== '' && byId[q.id] && given === byId[q.id].answer) score++;\n  }\n}\nconst total = pick.questions.length;\nconst feedback = answered ? String(submitted[pick.feedbackLabel] ?? '').trim() : '';\n\nlet headline;\nif (score === total) headline = 'Perfect score! You are an n8n legend!';\nelse if (score >= 8) headline = 'Outstanding! You really know your n8n.';\nelse if (score >= 6) headline = 'Great job! Solid n8n knowledge.';\nelse if (score >= 4) headline = 'Nice work! You are getting there.';\nelse headline = 'Thanks for playing! Every workflow starts somewhere.';\n\nconst firstName = pick.name.split(/\\s+/)[0] || 'there';\n\nreturn [{ json: {\n  status,\n  title: status === 'late' ? \"Time's up, \" + firstName : 'Congratulations, ' + firstName + '! 🎉',\n  message: status === 'late'\n    ? '<b>Your answers arrived after the time limit, so they were not counted.</b><br>You scored 0 out of ' + total + '.<br><br>Thanks for taking part!'\n    : '<b>You scored ' + score + ' out of ' + total + '.</b><br>' + headline +\n      '<br><br>' + (feedback ? 'Thanks for sharing your feedback!' : 'Thanks for taking the quiz!'),\n  participantId: pick.participantId,\n  finishedAt: new Date().toISOString(),\n  score: String(score),\n  total: String(total),\n  feedbackCell: safeCell(feedback),\n  questionIds: pick.questions.map((q) => q.id).join(',') + ',' + pick.feedbackId,\n} }];"
       },
       "id": "d835c469-6aa5-46d1-aebe-7e87e8455ce2",
-      "notesInFlow": true,
-      "notes": "Scores the answers. Status: done, late (after the deadline, scores 0) or timeout (nothing submitted).",
       "name": "Score Answers1",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -1541,8 +1527,6 @@
         }
       },
       "id": "1368c1f1-0454-4912-bb55-8dd0b9e40be8",
-      "notesInFlow": true,
-      "notes": "Final page: the score and a thank-you message.",
       "name": "Result Form1",
       "type": "n8n-nodes-base.form",
       "typeVersion": 2.5,
@@ -1554,17 +1538,129 @@
     },
     {
       "parameters": {
-        "content": "## n8n Rapid-Fire Quiz: overview\n\n1. **Sign-up** (Entry Form1 → Check Request): checks the name and email, applies the resend limits and makes a 6-digit code.\n2. **Email the code** (Send Code Email → Log Code): sends the code and stores its hash in `quiz_codes`.\n3. **Verify** (Code Form → Start Participant): checks the code (5 tries), then marks the email as used in `quiz_results`. One attempt per email.\n4. **Quiz** (Get Questions1 → Quiz Form1): picks 10 MCQs and 1 feedback question from `quiz_questions`. 7-minute limit.\n5. **Result** (Score Answers1 → Result Form1): scores the answers, saves them to `quiz_results` and shows the score.\n\nEvery rejection ends at **Error Page**. The bottom row is run once to create the tables.",
-        "height": 340,
-        "width": 760
+        "width": 560,
+        "height": 820,
+        "content": "## n8n Rapid-Fire Quiz\n### A timed quiz built only with n8n forms and data tables: sign-up, email verification, random questions, scoring and a results table.\n\n### How it works\n* A participant enters their name and email on the public form.\n* The workflow checks that the email hasn't played before, applies the resend limits and emails a 6-digit code.\n* The participant enters the code. It expires after 10 minutes and allows 5 tries.\n* 10 random multiple-choice questions (4 easy, 3 medium, 3 hard) and 1 feedback question are picked from the `quiz_questions` table.\n* The quiz form closes after 7 minutes. Answers are scored and saved to `quiz_results`, and the participant sees their score.\n\n### Setup\n1. Run **Run Once To Create Tables** to create `quiz_codes` and `quiz_results`.\n2. Create or import a `quiz_questions` data table with the columns `qid`, `type`, `difficulty`, `text`, `options`, `answer` and `active`. It needs at least 10 `mcq` rows (four options separated by `|`) and 1 `text` row.\n3. Add your SMTP credential to **Send Code Email** and change the sender address.\n4. Activate the workflow and share the form URL from **Entry Form1**.\n\n### Customization\n* Change the time limit and the difficulty mix in **Pick Questions1**.\n* Change the code expiry and resend limits in **Check Request**.\n* Edit the result messages in **Score Answers1**."
       },
       "id": "b7c1e0a2-3f4d-4c8e-9a51-6d2f0e7b1c34",
       "name": "Overview",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        208,
-        -560
+        -420,
+        -520
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 1. Sign-up and limits\nTakes the name and email, then checks whether this email has already played and how many codes were sent recently. Makes a 6-digit code if all is well.",
+        "height": 400,
+        "width": 1310,
+        "color": 7
+      },
+      "id": "34299eaf-6ac8-41da-8479-677e80e18401",
+      "name": "Section 1 Sign-up",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        160,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2. Email the code\nSends the code by SMTP and stores only its hash in `quiz_codes`. Rejected requests and failed sends go to the error page.",
+        "height": 920,
+        "width": 620,
+        "color": 7
+      },
+      "id": "6ed8a05f-ae1f-4b78-924a-5b448d94f790",
+      "name": "Section 2 Email the code",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1490,
+        -520
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3. Verify the code\nThe participant enters the code. It is checked for expiry and wrong tries (5 allowed), and the try count is saved.",
+        "height": 560,
+        "width": 1310,
+        "color": 7
+      },
+      "id": "0cfbb0c6-c589-422f-8233-caf078c83f23",
+      "name": "Section 3 Verify the code",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2130,
+        -520
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 4. Run the quiz\nMarks the email as used, picks 10 random MCQs and 1 feedback question from `quiz_questions`, and shows them with a 7-minute limit.",
+        "height": 400,
+        "width": 860,
+        "color": 7
+      },
+      "id": "cb047d88-43e8-49ef-ad05-912a603f6579",
+      "name": "Section 4 Run the quiz",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3460,
+        -520
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 5. Score and show the result\nScores the answers, saves them to `quiz_results` and shows the score. After a timeout no page is waiting, so the result is only saved.",
+        "height": 400,
+        "width": 920,
+        "color": 7
+      },
+      "id": "c7538399-674d-4dc6-8f09-df5215cde493",
+      "name": "Section 5 Score and result",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        4340,
+        -520
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Retry and error pages\nA wrong code goes back to the code page. Every other rejection ends on the error page.",
+        "height": 500,
+        "width": 640,
+        "color": 7
+      },
+      "id": "7c2ec5aa-3ca3-4ad3-b9ad-6fc3edc5959e",
+      "name": "Section Retry and errors",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3460,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## One-time setup\nRun this row once by hand to create the `quiz_codes` and `quiz_results` tables.",
+        "height": 400,
+        "width": 640,
+        "color": 7
+      },
+      "id": "e7d40643-3f59-4e14-b867-bc40c68226a6",
+      "name": "Section One-time setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        700,
+        300
       ]
     }
   ],
